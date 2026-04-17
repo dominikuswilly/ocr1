@@ -1,0 +1,8 @@
+paddleocr
+paddlepaddle==3.3.1
+opencv-python
+pydantic
+fastapi
+uvicorn
+python-multipart
+Pillow
