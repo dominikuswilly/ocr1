@@ -3,6 +3,7 @@ from typing import Optional, List
 
 class KtpResult(BaseModel):
     nik: Optional[str] = None
+    nama: Optional[str] = None
     confidence: float = 0.0
     extraction_method: str = "direct"
     filename: str
