@@ -1,6 +1,7 @@
 import re
 import logging
 from typing import List, Dict, Optional
+from thefuzz import process, fuzz
 
 class KtpDataExtractor:
     def __init__(self):
@@ -9,7 +10,7 @@ class KtpDataExtractor:
         self.province_codes = {
             "ACEH": "11", "SUMATERAUTARA": "12", "SUMATERABARAT": "13", "RIAU": "14",
             "JAMBI": "15", "SUMATERASELATAN": "16", "BENGKULU": "17", "LAMPUNG": "18",
-            "BANGKABELITUNG": "19", "KEPULAUANRIAU": "21", "DKIJAKARTA": "31",
+            "KEPULAUANBANGKABELITUNG": "19", "KEPULAUANRIAU": "21", "DKIJAKARTA": "31",
             "JAWABARAT": "32", "JAWATENGAH": "33", "DIYOGYAKARTA": "34", "JAWATIMUR": "35",
             "BANTEN": "36", "BALI": "51", "NUSATENGGARABARAT": "52", "NUSATENGGARATIMUR": "53",
             "KALIMANTANBARAT": "61", "KALIMANTANTENGAH": "62", "KALIMANTANSELATAN": "63",
@@ -18,14 +19,25 @@ class KtpDataExtractor:
             "GORONTALO": "75", "SULAWESIBARAT": "76", "MALUKU": "81", "MALUKUUTARA": "82",
             "PAPUABARAT": "91", "PAPUA": "92"
         }
+        self.provinces = [
+            "ACEH", "SUMATERA UTARA", "SUMATERA BARAT", "RIAU", "JAMBI", 
+            "SUMATERA SELATAN", "BENGKULU", "LAMPUNG", "KEPULAUAN BANGKA BELITUNG", 
+            "KEPULAUAN RIAU", "DKI JAKARTA", "JAWA BARAT", "JAWA TENGAH", 
+            "DI YOGYAKARTA", "JAWA TIMUR", "BANTEN", "BALI", "NUSA TENGGARA BARAT", 
+            "NUSA TENGGARA TIMUR", "KALIMANTAN BARAT", "KALIMANTAN TENGAH", 
+            "KALIMANTAN SELATAN", "KALIMANTAN TIMUR", "KALIMANTAN UTARA", 
+            "SULAWESI UTARA", "SULAWESI TENGAH", "SULAWESI SELATAN", 
+            "SULAWESI TENGGARA", "GORONTALO", "SULAWESI BARAT", "MALUKU", 
+            "MALUKU UTARA", "PAPUA BARAT", "PAPUA"
+        ]
 
-    def extract_nik(self, text_blocks: List[Dict]) -> Dict:
+    def extract_nik(self, text_blocks: List[Dict], img_height: int = 1000) -> Dict:
         """
         Robustly extracts NIK by cross-validating candidates against secondary fields
         (Birthdate, Gender, Province) and applying fuzzy corrections.
         """
         # 1. Extract secondary fields for validation
-        fields = self._extract_secondary_fields(text_blocks)
+        fields = self._extract_secondary_fields(text_blocks, img_height)
         self.logger.info(f"Secondary fields used for validation: {fields}")
 
         # 2. Gather all candidates (16-digit-like patterns)
@@ -143,6 +155,56 @@ class KtpDataExtractor:
 
         return {"nama": nama, "box": box}
 
+    def extract_province(self, text_blocks: List[Dict], img_height: int) -> Dict:
+        """
+        High-precision province extraction using spatial filtering and fuzzy matching.
+        """
+        # 1. Spatial Filtering: Province is usually in the top 20% of the card
+        # Logic: Collect all text from blocks where the Y-coordinate is low
+        top_text_candidates = []
+        candidate_boxes = []
+        for block in text_blocks:
+            b_box = block['box']
+            b_cy = (b_box[0][1] + b_box[2][1]) / 2
+            
+            if b_cy < (img_height * 0.25): # Look only in top 25%
+                clean_text = re.sub(r'[^A-Z ]', '', block['text'].upper())
+                # Filter out the word "PROVINSI" itself to avoid it confusing the matcher
+                clean_text = clean_text.replace("PROVINSI", "").strip()
+                if len(clean_text) > 3:
+                    top_text_candidates.append(clean_text)
+                    candidate_boxes.append(b_box)
+
+        if not top_text_candidates:
+            return {"province": None, "confidence": 0.0, "box": None}
+
+        # 2. Fuzzy Matching
+        # Join candidates to handle cases where province is split into two blocks
+        combined_top_text = " ".join(top_text_candidates)
+        
+        # We use extractOne to find the best match from our master list
+        best_match, score = process.extractOne(combined_top_text, self.provinces, scorer=fuzz.token_set_ratio)
+
+        # 3. Final Validation
+        # Threshold: Usually > 70 is very safe for KTP scans
+        box = None
+        if candidate_boxes:
+            import numpy as np
+            all_pts = np.array([pt for box in candidate_boxes for pt in box])
+            min_x, min_y = all_pts.min(axis=0)
+            max_x, max_y = all_pts.max(axis=0)
+            box = [[int(min_x), int(min_y)], [int(max_x), int(min_y)], [int(max_x), int(max_y)], [int(min_x), int(max_y)]]
+
+        if score > 75:
+            return {
+                "province": best_match,
+                "confidence": score / 100.0,
+                "raw_found": combined_top_text,
+                "box": box
+            }
+        
+        return {"province": None, "confidence": score / 100.0, "box": box}
+
     def _clean_name(self, text: str) -> str:
         """Cleans colons, symbols and noise from name string."""
         # 1. Remove leading colons, periods, or symbols
@@ -152,7 +214,7 @@ class KtpDataExtractor:
         # 3. Final trim and uppercase
         return text.strip().upper()
 
-    def _extract_secondary_fields(self, text_blocks: List[Dict]) -> Dict:
+    def _extract_secondary_fields(self, text_blocks: List[Dict], img_height: int = 1000) -> Dict:
         """Finds Birthdate, Gender, and Province in the OCR list."""
         all_text = " ".join([b['text'].upper() for b in text_blocks])
         all_text_no_space = all_text.replace(" ", "").replace(":", "").replace(".", "")
@@ -176,10 +238,10 @@ class KtpDataExtractor:
             fields["gender"] = "MALE"
 
         # 3. Extract Province Code
-        for prov_name, code in self.province_codes.items():
-            if prov_name in all_text_no_space:
-                fields["province_code"] = code
-                break
+        prov_result = self.extract_province(text_blocks, img_height)
+        if prov_result.get("province"):
+            clean_match = prov_result['province'].replace(" ", "")
+            fields["province_code"] = self.province_codes.get(clean_match)
 
         return fields
 
