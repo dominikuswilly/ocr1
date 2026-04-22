@@ -6,3 +6,5 @@ fastapi
 uvicorn
 python-multipart
 Pillow
+thefuzz
+rapidfuzz

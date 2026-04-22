@@ -39,6 +39,8 @@ async def extract_ktp(file: UploadFile = File(...)):
     debug_error = None
     text_blocks = []
     nik_data = {"nik": None, "confidence": 0.0, "method": "none"}
+    nama_data = {"nama": None, "box": None}
+    prov_data = {"province": None, "confidence": 0.0}
     steps = {}
 
     try:
@@ -57,11 +59,13 @@ async def extract_ktp(file: UploadFile = File(...)):
 
             # 4. Extract Data
             if text_blocks:
-                nik_data = extractor.extract_nik(text_blocks)
+                img_height = final_processed.shape[0]
+                nik_data = extractor.extract_nik(text_blocks, img_height=img_height)
                 nama_data = extractor.extract_nama(text_blocks, nik_box=nik_data.get("box"))
+                prov_data = extractor.extract_province(text_blocks, img_height=img_height)
                 
                 # Duplicate processing steps into field-specific folders
-                for folder in ["nik", "nama"]:
+                for folder in ["nik", "nama", "province"]:
                     for step_key in ["0_cropped", "1_enhanced", "2_grayscale", "3_denoised", "4_final_processed"]:
                         if step_key in steps:
                             steps[f"{folder}/{step_key}"] = steps[step_key]
@@ -83,9 +87,14 @@ async def extract_ktp(file: UploadFile = File(...)):
                     
                     label = f"NIK: {nik_data['nik']}"
                     tl = box[np.argmin(box.sum(axis=1))]
-                    cv2.putText(viz_nik, label, (tl[0], tl[1] - 10), 
+                    # Dynamic text placement to avoid clipping
+                    text_y = tl[1] - 10
+                    if text_y < 25:
+                        text_y = box[:, 1].max() + 25
+                    
+                    cv2.putText(viz_nik, label, (tl[0], text_y), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
-                    cv2.putText(viz_combined, label, (tl[0], tl[1] - 10), 
+                    cv2.putText(viz_combined, label, (tl[0], text_y), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
                     
                     steps["nik/5_visualized"] = viz_nik
@@ -102,13 +111,41 @@ async def extract_ktp(file: UploadFile = File(...)):
                     
                     label = f"nama: {nama_data['nama']}"
                     tl = box[np.argmin(box.sum(axis=1))]
-                    cv2.putText(viz_nama, label, (tl[0], tl[1] - 10), 
+                    # Dynamic text placement to avoid clipping
+                    text_y = tl[1] - 10
+                    if text_y < 25:
+                        text_y = box[:, 1].max() + 25
+
+                    cv2.putText(viz_nama, label, (tl[0], text_y), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
-                    cv2.putText(viz_combined, label, (tl[0], tl[1] - 10), 
+                    cv2.putText(viz_combined, label, (tl[0], text_y), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
                     
                     steps["nama/5_visualized"] = viz_nama
                 
+                # Province Visualization
+                if prov_data.get("province") and prov_data.get("box"):
+                    viz_prov = final_processed.copy()
+                    if len(viz_prov.shape) == 2: viz_prov = cv2.cvtColor(viz_prov, cv2.COLOR_GRAY2BGR)
+                    
+                    box = np.array(prov_data["box"], dtype=np.int32)
+                    cv2.polylines(viz_prov, [box], True, (0, 0, 255), 2)
+                    cv2.polylines(viz_combined, [box], True, (0, 0, 255), 2)
+                    
+                    label = f"PROV: {prov_data['province']}"
+                    tl = box[np.argmin(box.sum(axis=1))]
+                    # Dynamic text placement to avoid clipping (especially important for province at the top)
+                    text_y = tl[1] - 10
+                    if text_y < 25:
+                        text_y = box[:, 1].max() + 25
+
+                    cv2.putText(viz_prov, label, (tl[0], text_y), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+                    cv2.putText(viz_combined, label, (tl[0], text_y), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+                    
+                    steps["province/5_visualized"] = viz_prov
+
                 steps["5_visualized"] = viz_combined
 
             else:
@@ -128,6 +165,7 @@ async def extract_ktp(file: UploadFile = File(...)):
             "filename": file.filename,
             "nik": nik_data.get("nik"),
             "nama": nama_data.get("nama"),
+            "province": prov_data.get("province"),
             "confidence": nik_data.get("confidence"),
             "method": nik_data.get("method"),
             "raw_text": [b["text"] for b in text_blocks],
@@ -138,6 +176,7 @@ async def extract_ktp(file: UploadFile = File(...)):
     return KtpResult(
         nik=nik_data.get("nik"),
         nama=nama_data.get("nama") if text_blocks else None,
+        province=prov_data.get("province") if text_blocks else None,
         confidence=nik_data.get("confidence"),
         extraction_method=nik_data.get("method"),
         filename=file.filename,
