@@ -29,8 +29,10 @@ class ResultStorage:
         # Save All Image Steps
         for step_name, image in steps.items():
             img_path = os.path.join(session_dir, f"{step_name}.jpg")
+            # Ensure subdirectory exists if step_name contains '/'
+            os.makedirs(os.path.dirname(img_path), exist_ok=True)
             cv2.imwrite(img_path, image)
-            if "final" in step_name:
+            if "final" in step_name and "/" not in step_name:
                 final_img_path = img_path
 
         # Save Metadata (JSON)

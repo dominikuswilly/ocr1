@@ -55,29 +55,61 @@ async def extract_ktp(file: UploadFile = File(...)):
             # 3. Perform OCR
             text_blocks = ocr_engine.extract_text_blocks(final_processed)
 
-            # 4. Extract NIK
+            # 4. Extract Data
             if text_blocks:
                 nik_data = extractor.extract_nik(text_blocks)
+                nama_data = extractor.extract_nama(text_blocks, nik_box=nik_data.get("box"))
                 
-                # 4.5 Visualize the result on a diagnostic image
+                # Duplicate processing steps into field-specific folders
+                for folder in ["nik", "nama"]:
+                    for step_key in ["0_cropped", "1_enhanced", "2_grayscale", "3_denoised", "4_final_processed"]:
+                        if step_key in steps:
+                            steps[f"{folder}/{step_key}"] = steps[step_key]
+
+                # 4.5 Visualize results
+                viz_combined = final_processed.copy()
+                if len(viz_combined.shape) == 2:
+                    viz_combined = cv2.cvtColor(viz_combined, cv2.COLOR_GRAY2BGR)
+                
+                # NIK Visualization
                 if nik_data.get("nik") and nik_data.get("box"):
-                    viz_img = final_processed.copy()
-                    # Convert to BGR for color drawing if grayscale
-                    if len(viz_img.shape) == 2:
-                        viz_img = cv2.cvtColor(viz_img, cv2.COLOR_GRAY2BGR)
+                    # Field-specific viz
+                    viz_nik = final_processed.copy()
+                    if len(viz_nik.shape) == 2: viz_nik = cv2.cvtColor(viz_nik, cv2.COLOR_GRAY2BGR)
                     
-                    # Draw ROI box
                     box = np.array(nik_data["box"], dtype=np.int32)
-                    cv2.polylines(viz_img, [box], True, (0, 255, 0), 3)
+                    cv2.polylines(viz_nik, [box], True, (0, 255, 0), 2)
+                    cv2.polylines(viz_combined, [box], True, (0, 255, 0), 2)
                     
-                    # Draw text label
                     label = f"NIK: {nik_data['nik']}"
-                    # Find top-left most point for label placement
                     tl = box[np.argmin(box.sum(axis=1))]
-                    cv2.putText(viz_img, label, (tl[0], tl[1] - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    cv2.putText(viz_nik, label, (tl[0], tl[1] - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+                    cv2.putText(viz_combined, label, (tl[0], tl[1] - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
                     
-                    steps["5_visualized"] = viz_img
+                    steps["nik/5_visualized"] = viz_nik
+
+                # Nama Visualization
+                if nama_data.get("nama") and nama_data.get("box"):
+                    # Field-specific viz
+                    viz_nama = final_processed.copy()
+                    if len(viz_nama.shape) == 2: viz_nama = cv2.cvtColor(viz_nama, cv2.COLOR_GRAY2BGR)
+                    
+                    box = np.array(nama_data["box"], dtype=np.int32)
+                    cv2.polylines(viz_nama, [box], True, (255, 255, 0), 2)
+                    cv2.polylines(viz_combined, [box], True, (255, 255, 0), 2)
+                    
+                    label = f"nama: {nama_data['nama']}"
+                    tl = box[np.argmin(box.sum(axis=1))]
+                    cv2.putText(viz_nama, label, (tl[0], tl[1] - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+                    cv2.putText(viz_combined, label, (tl[0], tl[1] - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
+                    
+                    steps["nama/5_visualized"] = viz_nama
+                
+                steps["5_visualized"] = viz_combined
 
             else:
                 debug_error = f"OCR engine returned no text blocks. Engine error: {ocr_engine.last_error}"
@@ -95,6 +127,7 @@ async def extract_ktp(file: UploadFile = File(...)):
         metadata = {
             "filename": file.filename,
             "nik": nik_data.get("nik"),
+            "nama": nama_data.get("nama"),
             "confidence": nik_data.get("confidence"),
             "method": nik_data.get("method"),
             "raw_text": [b["text"] for b in text_blocks],
@@ -104,6 +137,7 @@ async def extract_ktp(file: UploadFile = File(...)):
 
     return KtpResult(
         nik=nik_data.get("nik"),
+        nama=nama_data.get("nama") if text_blocks else None,
         confidence=nik_data.get("confidence"),
         extraction_method=nik_data.get("method"),
         filename=file.filename,

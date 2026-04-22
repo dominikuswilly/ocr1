@@ -61,6 +61,97 @@ class KtpDataExtractor:
             "box": best.get('box')
         }
 
+    def extract_nama(self, text_blocks: List[Dict], nik_box: Optional[List] = None) -> Dict:
+        """
+        Robust Name extraction using Spatial Layout Analysis & Multi-block Joining.
+        1. Find Label/Row.
+        2. Collect ALL blocks in the horizontal 'lane'.
+        3. Sort by X and Join.
+        """
+        import numpy as np
+        label_variants = ["NAMA", "NAIA", "NANA", "NAM A", "NAHA", "MAMA", "NAM4", "NA MA", "NAMA:"]
+        nama = None
+        box = None
+        
+        val_col_x = nik_box[0][0] if nik_box else None
+
+        # 1. Find 'Nama' Label Row
+        label_y = None
+        l_idx = -1
+        for i, block in enumerate(text_blocks):
+            upper_text = block['text'].upper().replace(" ", "")
+            if any(var in upper_text for var in label_variants) and len(upper_text) < 12:
+                l_idx = i
+                l_box = block['box']
+                label_y = (l_box[0][1] + l_box[2][1]) / 2 # Center Y
+                break
+
+        # 2. Collect Candidates in Lane
+        candidates = []
+        if label_y is not None:
+            l_box = text_blocks[l_idx]['box']
+            l_right = l_box[1][0]
+
+            for i, block in enumerate(text_blocks):
+                if i == l_idx: continue
+                b_box = block['box']
+                b_cy = (b_box[0][1] + b_box[2][1]) / 2
+                b_left = b_box[0][0]
+                
+                # Capture everything in the 'Nama' lane to the right of the label
+                if abs(b_cy - label_y) < 35 and b_left > (l_right - 15):
+                    # Filter known field headers
+                    if not any(h in block['text'].upper() for h in ["NIK", "TEMPAT", "LAHIR", "PROVINSI", "ALAMAT"]):
+                        candidates.append(block)
+
+        # 3. Spatial Fallback (Below NIK) if no candidates found
+        if not candidates and nik_box:
+            nik_cy = (nik_box[0][1] + nik_box[2][1]) / 2
+            for block in text_blocks:
+                b_box = block['box']
+                b_cy = (b_box[0][1] + b_box[2][1]) / 2
+                b_left = b_box[0][0]
+                
+                dist_y = b_cy - nik_cy
+                if 30 < dist_y < 130 and val_col_x and abs(b_left - val_col_x) < 80:
+                    text_upper = block['text'].upper()
+                    if len(text_upper) >= 3 and not any(h in text_upper for h in ["NIK", "TEMPAT", "LAHIR", "PROVINSI"]):
+                        candidates.append(block)
+
+        # 4. Join Results
+        if candidates:
+            # Sort by X to handle segmented names correctly
+            candidates.sort(key=lambda x: x['box'][0][0])
+            
+            raw_nama = " ".join([c['text'] for c in candidates])
+            nama = self._clean_name(raw_nama)
+            
+            # Create a bounding box that encompasses all merged blocks
+            all_pts = []
+            for c in candidates:
+                all_pts.extend(c['box'])
+            all_pts = np.array(all_pts)
+            
+            min_x, min_y = all_pts.min(axis=0)
+            max_x, max_y = all_pts.max(axis=0)
+            box = [
+                [int(min_x), int(min_y)],
+                [int(max_x), int(min_y)],
+                [int(max_x), int(max_y)],
+                [int(min_x), int(max_y)]
+            ]
+
+        return {"nama": nama, "box": box}
+
+    def _clean_name(self, text: str) -> str:
+        """Cleans colons, symbols and noise from name string."""
+        # 1. Remove leading colons, periods, or symbols
+        text = re.sub(r'^[ :.\-]+', '', text)
+        # 2. Normalize whitespace (convert multi-space/tabs to single space)
+        text = re.sub(r'\s+', ' ', text)
+        # 3. Final trim and uppercase
+        return text.strip().upper()
+
     def _extract_secondary_fields(self, text_blocks: List[Dict]) -> Dict:
         """Finds Birthdate, Gender, and Province in the OCR list."""
         all_text = " ".join([b['text'].upper() for b in text_blocks])
@@ -179,5 +270,5 @@ class KtpDataExtractor:
     def _is_on_same_line(self, box1, box2, tolerance=30):
         # Center Y of both boxes
         y1 = (box1[0][1] + box1[2][1]) / 2
-        y2 = (box1[0][1] + box1[2][1]) / 2
+        y2 = (box2[0][1] + box2[2][1]) / 2
         return abs(y1 - y2) < tolerance
